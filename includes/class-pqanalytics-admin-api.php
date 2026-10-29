@@ -21,6 +21,7 @@ class PQAnalytics_Admin_API {
 		$routes = array(
 			array( '/admin/overview', 'GET', 'overview' ),
 			array( '/admin/visit/(?P<id>\d+)/path', 'GET', 'path' ),
+			array( '/admin/visitor/(?P<vid>[a-f0-9]{32})/history', 'GET', 'history' ),
 			array( '/admin/block', 'POST', 'block' ),
 			array( '/admin/unblock', 'POST', 'unblock' ),
 			array( '/admin/note', 'POST', 'note' ),
@@ -43,21 +44,44 @@ class PQAnalytics_Admin_API {
 		}
 	}
 
+	public static function search_params( $source ) {
+		$get = function ( $key ) use ( $source ) {
+			if ( is_object( $source ) && method_exists( $source, 'get_param' ) ) {
+				return $source->get_param( $key );
+			}
+			return isset( $source[ $key ] ) ? $source[ $key ] : null;
+		};
+		return array(
+			'in'     => sanitize_key( (string) $get( 'in' ) ),
+			'unique' => (int) $get( 'unique' ),
+			'page1'  => sanitize_text_field( (string) $get( 'page1' ) ),
+			'page2'  => sanitize_text_field( (string) $get( 'page2' ) ),
+			'from'   => sanitize_text_field( (string) $get( 'from' ) ),
+			'to'     => sanitize_text_field( (string) $get( 'to' ) ),
+			'tfrom'  => sanitize_text_field( (string) $get( 'tfrom' ) ),
+			'tto'    => sanitize_text_field( (string) $get( 'tto' ) ),
+		);
+	}
+
 	public static function overview( $request ) {
 		$filter = sanitize_key( (string) $request->get_param( 'filter' ) );
 		$search = sanitize_text_field( (string) $request->get_param( 'search' ) );
 		$page   = max( 1, (int) $request->get_param( 'page' ) );
 		$light  = (bool) $request->get_param( 'light' );
+		$opts   = self::search_params( $request );
 
 		$data = array(
 			'cards'    => PQAnalytics_Stats::cards(),
-			'visitors' => PQAnalytics_Stats::visitors( $filter, $search, $page ),
+			'visitors' => PQAnalytics_Stats::visitors( $filter, $search, $page, $opts ),
 			'now'      => PQAnalytics_Stats::local( PQAnalytics_DB::now(), 'g:i:s A' ),
 		);
 		if ( ! $light ) {
 			$data['hourly']  = PQAnalytics_Stats::hourly();
 			$data['daily']   = PQAnalytics_Stats::daily( 30 );
 			$data['screens'] = PQAnalytics_Stats::resolutions();
+		}
+		if ( $request->get_param( 'paths' ) ) {
+			$data['paths'] = PQAnalytics_Stats::path_list();
 		}
 		$response = new WP_REST_Response( $data, 200 );
 		$response->header( 'Cache-Control', 'no-store' );
@@ -66,6 +90,17 @@ class PQAnalytics_Admin_API {
 
 	public static function path( $request ) {
 		return new WP_REST_Response( array( 'hits' => PQAnalytics_Stats::path( (int) $request['id'] ) ), 200 );
+	}
+
+	public static function history( $request ) {
+		$vid  = sanitize_text_field( (string) $request['vid'] );
+		$data = PQAnalytics_Stats::history( $vid );
+		if ( null === $data ) {
+			return new WP_Error( 'pqanalytics_bad_vid', __( 'Unknown visitor.', 'pinnaclequant-com-analytics' ), array( 'status' => 404 ) );
+		}
+		$response = new WP_REST_Response( $data, 200 );
+		$response->header( 'Cache-Control', 'no-store' );
+		return $response;
 	}
 
 	public static function block( $request ) {

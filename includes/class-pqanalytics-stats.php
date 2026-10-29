@@ -288,65 +288,272 @@ class PQAnalytics_Stats {
 		);
 	}
 
-	public static function visitors( $filter = 'all', $search = '', $page = 1 ) {
+	public static function search_opts( $opts ) {
+		$opts = is_array( $opts ) ? $opts : array();
+		$out  = array(
+			'in'     => ( isset( $opts['in'] ) && 'note' === $opts['in'] ) ? 'note' : 'all',
+			'unique' => ! empty( $opts['unique'] ) ? 1 : 0,
+			'page1'  => isset( $opts['page1'] ) ? self::page_needle( $opts['page1'] ) : '',
+			'page2'  => isset( $opts['page2'] ) ? self::page_needle( $opts['page2'] ) : '',
+			'from'   => isset( $opts['from'] ) ? self::clean_date( $opts['from'] ) : '',
+			'to'     => isset( $opts['to'] ) ? self::clean_date( $opts['to'] ) : '',
+			'tfrom'  => isset( $opts['tfrom'] ) ? self::clean_time( $opts['tfrom'] ) : '',
+			'tto'    => isset( $opts['tto'] ) ? self::clean_time( $opts['tto'] ) : '',
+		);
+		if ( '' !== $out['from'] && '' !== $out['to'] && $out['from'] > $out['to'] ) {
+			$swap        = $out['from'];
+			$out['from'] = $out['to'];
+			$out['to']   = $swap;
+		}
+		return $out;
+	}
+
+	public static function search_active( $o ) {
+		return '' !== $o['page1'] || '' !== $o['page2'] || '' !== $o['from'] || '' !== $o['to'] || '' !== $o['tfrom'] || '' !== $o['tto'] || $o['unique'];
+	}
+
+	public static function page_needle( $raw ) {
+		$raw = trim( wp_strip_all_tags( (string) $raw ) );
+		if ( '' === $raw ) {
+			return '';
+		}
+		if ( preg_match( '#^(https?:)?//#i', $raw ) || preg_match( '#^www\.#i', $raw ) ) {
+			$url   = preg_match( '#^(https?:)?//#i', $raw ) ? $raw : 'https://' . $raw;
+			$parts = wp_parse_url( $url );
+			$raw   = ( is_array( $parts ) && isset( $parts['path'] ) ) ? $parts['path'] : '/';
+		}
+		$raw = rtrim( $raw, '/' );
+		if ( '' === $raw ) {
+			return '/';
+		}
+		return PQAnalytics_DB::cut( $raw, 200 );
+	}
+
+	public static function clean_date( $raw ) {
+		$raw = trim( (string) $raw );
+		if ( preg_match( '/^(\d{4})-(\d{2})-(\d{2})$/', $raw, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ) {
+			return $raw;
+		}
+		return '';
+	}
+
+	public static function clean_time( $raw ) {
+		$raw = trim( (string) $raw );
+		if ( preg_match( '/^(\d{1,2}):(\d{2})(?::\d{2})?$/', $raw, $m ) && (int) $m[1] <= 23 && (int) $m[2] <= 59 ) {
+			return sprintf( '%02d:%02d', (int) $m[1], (int) $m[2] );
+		}
+		return '';
+	}
+
+	private static function utc_stamp( $ymd, $hms, $tz ) {
+		$d = new DateTime( $ymd . ' ' . $hms, $tz );
+		$d->setTimezone( new DateTimeZone( 'UTC' ) );
+		return $d->format( 'Y-m-d H:i:s' );
+	}
+
+	public static function time_windows( $o ) {
+		$tz  = self::tz();
+		$out = array(
+			'start'   => '',
+			'end'     => '',
+			'windows' => array(),
+		);
+		try {
+			if ( '' !== $o['from'] ) {
+				$out['start'] = self::utc_stamp( $o['from'], '00:00:00', $tz );
+			}
+			if ( '' !== $o['to'] ) {
+				$d = new DateTime( $o['to'] . ' 00:00:00', $tz );
+				$d->modify( '+1 day' );
+				$d->setTimezone( new DateTimeZone( 'UTC' ) );
+				$out['end'] = $d->format( 'Y-m-d H:i:s' );
+			}
+			if ( '' === $o['tfrom'] && '' === $o['tto'] ) {
+				return $out;
+			}
+			$tf   = '' !== $o['tfrom'] ? $o['tfrom'] : '00:00';
+			$tt   = '' !== $o['tto'] ? $o['tto'] : '23:59';
+			$last = '' !== $o['to'] ? new DateTime( $o['to'] . ' 00:00:00', $tz ) : new DateTime( 'now', $tz );
+			$last->setTime( 0, 0, 0 );
+			$first = '' !== $o['from'] ? new DateTime( $o['from'] . ' 00:00:00', $tz ) : clone $last;
+			if ( '' === $o['from'] ) {
+				$first->modify( '-365 days' );
+			}
+			$floor = clone $last;
+			$floor->modify( '-365 days' );
+			if ( $first < $floor ) {
+				$first = $floor;
+			}
+			if ( $first > $last ) {
+				$first = clone $last;
+			}
+			$day = clone $first;
+			while ( $day <= $last ) {
+				$ymd = $day->format( 'Y-m-d' );
+				if ( $tf <= $tt ) {
+					$out['windows'][] = array( self::utc_stamp( $ymd, $tf . ':00', $tz ), self::utc_stamp( $ymd, $tt . ':59', $tz ) );
+				} else {
+					$out['windows'][] = array( self::utc_stamp( $ymd, $tf . ':00', $tz ), self::utc_stamp( $ymd, '23:59:59', $tz ) );
+					$out['windows'][] = array( self::utc_stamp( $ymd, '00:00:00', $tz ), self::utc_stamp( $ymd, $tt . ':59', $tz ) );
+				}
+				$day->modify( '+1 day' );
+			}
+		} catch ( \Exception $e ) {
+			return array(
+				'start'   => '',
+				'end'     => '',
+				'windows' => array(),
+			);
+		}
+		return $out;
+	}
+
+	public static function zone_info( $from = '', $to = '' ) {
+		$tz    = self::tz();
+		$label = self::tz_label();
+		$name  = $label;
+		if ( false !== strpos( $name, '/' ) ) {
+			$name = substr( strrchr( $name, '/' ), 1 );
+		}
+		$name  = str_replace( '_', ' ', (string) $name );
+		$abbrs = array();
+		foreach ( array( $from, $to ) as $ymd ) {
+			try {
+				$d = ( '' !== $ymd ) ? new DateTime( $ymd . ' 12:00:00', $tz ) : new DateTime( 'now', $tz );
+				$a = $d->format( 'T' );
+				if ( '' !== $a && ! preg_match( '/^(GMT|UTC)?[+-]\d/i', $a ) && $a !== $name && ! in_array( $a, $abbrs, true ) ) {
+					$abbrs[] = $a;
+				}
+			} catch ( \Exception $e ) {
+				continue;
+			}
+		}
+		return array(
+			'name' => $name,
+			'abbr' => implode( '/', $abbrs ),
+		);
+	}
+
+	private static function path_test( $alias, $needle, &$args ) {
+		global $wpdb;
+		if ( '/' === $needle ) {
+			$args[] = '/';
+			return $alias . '.path = %s';
+		}
+		$args[] = '%' . $wpdb->esc_like( $needle ) . '%';
+		return $alias . '.path LIKE %s';
+	}
+
+	public static function search_where( $vs, $vr, $filter, $search, $o, $win ) {
+		global $wpdb;
+		$hits   = PQAnalytics_DB::table( 'hits' );
+		$cutoff = gmdate( 'Y-m-d H:i:s', time() - PQANALYTICS_LIVE_SECONDS );
+		$sql    = array();
+		$args   = array();
+
+		$sql[]  = $vs . '.is_bot = %d';
+		$args[] = ( 'bots' === $filter ) ? 1 : 0;
+		$sql[]  = $vs . '.last_beat >= %s';
+		$args[] = ( 'live' === $filter ) ? $cutoff : '1970-01-01 00:00:00';
+		$sql[]  = $vs . '.visit_no >= %d';
+		$args[] = ( 'returning' === $filter ) ? 2 : 1;
+
+		$search = trim( (string) $search );
+		if ( '' !== $search ) {
+			$like = '%' . $wpdb->esc_like( $search ) . '%';
+			if ( 'note' === $o['in'] ) {
+				$sql[]  = $vr . '.label LIKE %s';
+				$args[] = $like;
+			} else {
+				$cols  = array( $vs . '.ip', $vs . '.city', $vs . '.region', $vs . '.country', $vs . '.isp', $vs . '.source', $vs . '.last_url', $vs . '.member', $vr . '.name', $vr . '.email', $vr . '.label' );
+				$parts = array();
+				foreach ( $cols as $col ) {
+					$parts[] = $col . ' LIKE %s';
+					$args[]  = $like;
+				}
+				if ( in_array( strtolower( $search ), array( 'member', 'members' ), true ) ) {
+					$parts[] = $vs . ".member <> ''";
+				}
+				$sql[] = '(' . implode( ' OR ', $parts ) . ')';
+			}
+		}
+
+		if ( '' !== $o['page1'] && '' !== $o['page2'] ) {
+			$a     = array( $hits, $hits );
+			$t1    = self::path_test( 'h1', $o['page1'], $a );
+			$t2    = self::path_test( 'h2', $o['page2'], $a );
+			$sql[] = 'EXISTS (SELECT 1 FROM %i h1 INNER JOIN %i h2 ON h2.visit_id = h1.visit_id AND h2.id > h1.id WHERE h1.visit_id = ' . $vs . '.id AND ' . $t1 . ' AND ' . $t2 . ')';
+			$args  = array_merge( $args, $a );
+		} elseif ( '' !== $o['page1'] || '' !== $o['page2'] ) {
+			$a     = array( $hits );
+			$t1    = self::path_test( 'h1', '' !== $o['page1'] ? $o['page1'] : $o['page2'], $a );
+			$sql[] = 'EXISTS (SELECT 1 FROM %i h1 WHERE h1.visit_id = ' . $vs . '.id AND ' . $t1 . ')';
+			$args  = array_merge( $args, $a );
+		}
+
+		if ( '' !== $win['start'] ) {
+			$sql[]  = $vs . '.started >= %s';
+			$args[] = $win['start'];
+		}
+		if ( '' !== $win['end'] ) {
+			$sql[]  = $vs . '.started < %s';
+			$args[] = $win['end'];
+		}
+		if ( ! empty( $win['windows'] ) ) {
+			$parts = array();
+			foreach ( $win['windows'] as $w ) {
+				$parts[] = '(' . $vs . '.started >= %s AND ' . $vs . '.started <= %s)';
+				$args[]  = $w[0];
+				$args[]  = $w[1];
+			}
+			$sql[] = '(' . implode( ' OR ', $parts ) . ')';
+		}
+
+		return array(
+			'sql'  => implode( ' AND ', $sql ),
+			'args' => $args,
+		);
+	}
+
+	private static function search_clause( $filter, $search, $o ) {
+		$visits   = PQAnalytics_DB::table( 'visits' );
+		$visitors = PQAnalytics_DB::table( 'visitors' );
+		$win      = self::time_windows( $o );
+		$w        = self::search_where( 'vs', 'vr', $filter, $search, $o, $win );
+		$where    = $w['sql'];
+		$args     = $w['args'];
+		if ( $o['unique'] ) {
+			$w2     = self::search_where( 'v2', 'r2', $filter, $search, $o, $win );
+			$where .= ' AND vs.id IN (SELECT MAX(v2.id) FROM %i v2 LEFT JOIN %i r2 ON r2.id = v2.visitor_id WHERE ' . $w2['sql'] . ' GROUP BY v2.visitor_id, CASE WHEN v2.visitor_id = 0 THEN v2.ip ELSE %s END)';
+			$args   = array_merge( $args, array( $visits, $visitors ), $w2['args'], array( '' ) );
+		}
+		return array(
+			'sql'  => $where,
+			'args' => $args,
+		);
+	}
+
+	public static function visitors( $filter = 'all', $search = '', $page = 1, $opts = array() ) {
 		global $wpdb;
 		$visits   = PQAnalytics_DB::table( 'visits' );
 		$visitors = PQAnalytics_DB::table( 'visitors' );
 		$cutoff   = gmdate( 'Y-m-d H:i:s', time() - PQANALYTICS_LIVE_SECONDS );
-		$is_bot   = ( 'bots' === $filter ) ? 1 : 0;
-		$since    = ( 'live' === $filter ) ? $cutoff : '1970-01-01 00:00:00';
-		$min_no   = ( 'returning' === $filter ) ? 2 : 1;
-		$search   = trim( (string) $search );
-		$has_q    = ( '' !== $search ) ? 1 : 0;
-		$like     = ( '' !== $search ) ? '%' . $wpdb->esc_like( $search ) . '%' : '%';
+		$o        = self::search_opts( $opts );
 		$page     = max( 1, (int) $page );
 		$offset   = ( $page - 1 ) * self::PER_PAGE;
+		$clause   = self::search_clause( $filter, $search, $o );
 
 		$total = (int) $wpdb->get_var(
 			$wpdb->prepare(
-				'SELECT COUNT(*) FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE vs.is_bot = %d AND vs.last_beat >= %s AND vs.visit_no >= %d AND (%d = 0 OR vs.ip LIKE %s OR vs.city LIKE %s OR vs.region LIKE %s OR vs.country LIKE %s OR vs.isp LIKE %s OR vs.source LIKE %s OR vs.last_url LIKE %s OR vs.member LIKE %s OR vr.name LIKE %s OR vr.email LIKE %s OR vr.label LIKE %s)',
-				$visits,
-				$visitors,
-				$is_bot,
-				$since,
-				$min_no,
-				$has_q,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like
+				'SELECT COUNT(*) FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE ' . $clause['sql'],
+				array_merge( array( $visits, $visitors ), $clause['args'] )
 			)
 		);
 
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				'SELECT vs.*, vr.vid, vr.first_seen, vr.name, vr.email, vr.phone, vr.label FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE vs.is_bot = %d AND vs.last_beat >= %s AND vs.visit_no >= %d AND (%d = 0 OR vs.ip LIKE %s OR vs.city LIKE %s OR vs.region LIKE %s OR vs.country LIKE %s OR vs.isp LIKE %s OR vs.source LIKE %s OR vs.last_url LIKE %s OR vs.member LIKE %s OR vr.name LIKE %s OR vr.email LIKE %s OR vr.label LIKE %s) ORDER BY vs.last_beat DESC LIMIT %d OFFSET %d',
-				$visits,
-				$visitors,
-				$is_bot,
-				$since,
-				$min_no,
-				$has_q,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				$like,
-				self::PER_PAGE,
-				$offset
+				'SELECT vs.*, vr.vid, vr.first_seen, vr.visits AS visits_total, vr.name, vr.email, vr.phone, vr.label FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE ' . $clause['sql'] . ' ORDER BY vs.last_beat DESC LIMIT %d OFFSET %d',
+				array_merge( array( $visits, $visitors ), $clause['args'], array( self::PER_PAGE, $offset ) )
 			),
 			ARRAY_A
 		);
@@ -366,11 +573,39 @@ class PQAnalytics_Stats {
 			$out[ $i ]['more']   = isset( $recent[ $row['id'] ] ) ? $recent[ $row['id'] ]['more'] : 0;
 		}
 		return array(
-			'rows'  => $out,
-			'total' => $total,
-			'page'  => $page,
-			'pages' => (int) max( 1, ceil( $total / self::PER_PAGE ) ),
+			'rows'   => $out,
+			'total'  => $total,
+			'page'   => $page,
+			'pages'  => (int) max( 1, ceil( $total / self::PER_PAGE ) ),
+			'unique' => $o['unique'],
+			'zone'   => self::zone_info( $o['from'], $o['to'] ),
 		);
+	}
+
+	public static function path_list( $limit = 2000 ) {
+		global $wpdb;
+		$hits   = PQAnalytics_DB::table( 'hits' );
+		$visits = PQAnalytics_DB::table( 'visits' );
+		$rows   = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT h.path, COUNT(DISTINCT h.visit_id) AS visits FROM %i h INNER JOIN %i v ON v.id = h.visit_id WHERE v.is_bot = 0 AND h.path <> '' GROUP BY h.path ORDER BY visits DESC LIMIT %d",
+				$hits,
+				$visits,
+				(int) $limit
+			),
+			ARRAY_A
+		);
+		$out = array();
+		if ( ! is_array( $rows ) ) {
+			return $out;
+		}
+		foreach ( $rows as $r ) {
+			$out[] = array(
+				'p' => (string) $r['path'],
+				'n' => (int) $r['visits'],
+			);
+		}
+		return $out;
 	}
 
 	public static function recent_paths( $ids, $limit = 5 ) {
@@ -470,6 +705,7 @@ class PQAnalytics_Stats {
 			'country'     => (string) $r['country'],
 			'isp'         => (string) $r['isp'],
 			'visit_no'    => (int) $r['visit_no'],
+			'visits_total' => isset( $r['visits_total'] ) ? max( (int) $r['visits_total'], (int) $r['visit_no'] ) : (int) $r['visit_no'],
 			'member'      => isset( $r['member'] ) ? (string) $r['member'] : '',
 			'first_seen'  => isset( $r['first_seen'] ) ? self::local( $r['first_seen'], 'M j, Y' ) : '',
 			'name'        => isset( $r['name'] ) ? (string) $r['name'] : '',
@@ -504,7 +740,7 @@ class PQAnalytics_Stats {
 		$visitors = PQAnalytics_DB::table( 'visitors' );
 		$row      = $wpdb->get_row(
 			$wpdb->prepare(
-				'SELECT vs.*, vr.vid, vr.first_seen, vr.name, vr.email, vr.phone, vr.label FROM %i vs INNER JOIN %i vr ON vr.id = vs.visitor_id WHERE vr.vid = %s ORDER BY vs.id DESC LIMIT 1',
+				'SELECT vs.*, vr.vid, vr.first_seen, vr.visits AS visits_total, vr.name, vr.email, vr.phone, vr.label FROM %i vs INNER JOIN %i vr ON vr.id = vs.visitor_id WHERE vr.vid = %s ORDER BY vs.id DESC LIMIT 1',
 				$visits,
 				$visitors,
 				$vid
@@ -518,6 +754,112 @@ class PQAnalytics_Stats {
 		$out    = self::format_visit( $row, $cutoff, PQAnalytics_Blocker::blocked() );
 		$out['path'] = self::path( (int) $row['id'] );
 		return $out;
+	}
+
+	public static function history( $vid ) {
+		global $wpdb;
+		$visitor = PQAnalytics_DB::visitor_by_vid( $vid );
+		if ( ! $visitor ) {
+			return null;
+		}
+		$visits = PQAnalytics_DB::table( 'visits' );
+		$hits   = PQAnalytics_DB::table( 'hits' );
+		$id     = (int) $visitor['id'];
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				'SELECT id, visit_no, started, last_beat, pages, source, source_type, keyword, utm_campaign, city, region, country_code, screen_class, browser, browser_ver, os FROM %i WHERE visitor_id = %d AND is_bot = 0 ORDER BY id DESC LIMIT 30',
+				$visits,
+				$id
+			),
+			ARRAY_A
+		);
+		$rows = is_array( $rows ) ? $rows : array();
+		$ids  = array();
+		foreach ( $rows as $r ) {
+			$ids[] = (int) $r['id'];
+		}
+
+		$by_visit = array();
+		if ( ! empty( $ids ) ) {
+			$hit_rows = $wpdb->get_results(
+				$wpdb->prepare(
+					'SELECT visit_id, url, title, hit_time, duration FROM %i WHERE visit_id IN (' . implode( ',', array_fill( 0, count( $ids ), '%d' ) ) . ') ORDER BY visit_id DESC, id ASC LIMIT 2000',
+					array_merge( array( $hits ), $ids )
+				),
+				ARRAY_A
+			);
+			if ( is_array( $hit_rows ) ) {
+				foreach ( $hit_rows as $h ) {
+					$v = (int) $h['visit_id'];
+					if ( ! isset( $by_visit[ $v ] ) ) {
+						$by_visit[ $v ] = array( 'hits' => array(), 'more' => 0 );
+					}
+					if ( count( $by_visit[ $v ]['hits'] ) >= 40 ) {
+						$by_visit[ $v ]['more']++;
+						continue;
+					}
+					$by_visit[ $v ]['hits'][] = self::format_hit( $h );
+				}
+			}
+		}
+
+		$out = array();
+		foreach ( $rows as $r ) {
+			$v        = (int) $r['id'];
+			$seconds  = max( 0, (int) strtotime( $r['last_beat'] . ' UTC' ) - (int) strtotime( $r['started'] . ' UTC' ) );
+			$location = array_filter( array( $r['city'], $r['region'], $r['country_code'] ) );
+			$out[]    = array(
+				'id'       => $v,
+				'visit_no' => (int) $r['visit_no'],
+				'date'     => self::local( $r['started'], 'D, M j, Y' ),
+				'time'     => self::local( $r['started'], 'g:i A' ),
+				'seconds'  => $seconds,
+				'pages'    => (int) $r['pages'],
+				'source'   => (string) $r['source'],
+				'keyword'  => (string) $r['keyword'],
+				'campaign' => (string) $r['utm_campaign'],
+				'location' => implode( ', ', $location ),
+				'screen'   => (string) $r['screen_class'],
+				'browser'  => trim( $r['browser'] . ' ' . $r['browser_ver'] ),
+				'os'       => (string) $r['os'],
+				'hits'     => isset( $by_visit[ $v ] ) ? $by_visit[ $v ]['hits'] : array(),
+				'more'     => isset( $by_visit[ $v ] ) ? $by_visit[ $v ]['more'] : 0,
+			);
+		}
+
+		$pages = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT h.path, MAX(h.url) AS url, MAX(h.title) AS title, COUNT(DISTINCT h.visit_id) AS visits, COUNT(*) AS views, SUM(h.duration) AS seconds FROM %i h INNER JOIN %i v ON v.id = h.visit_id WHERE v.visitor_id = %d AND v.is_bot = 0 AND h.path <> '' GROUP BY h.path ORDER BY visits DESC, views DESC LIMIT 15",
+				$hits,
+				$visits,
+				$id
+			),
+			ARRAY_A
+		);
+		$top = array();
+		if ( is_array( $pages ) ) {
+			foreach ( $pages as $p ) {
+				$top[] = array(
+					'path'    => (string) $p['path'],
+					'url'     => (string) $p['url'],
+					'title'   => PQAnalytics_DB::clean_title( $p['title'] ),
+					'visits'  => (int) $p['visits'],
+					'views'   => (int) $p['views'],
+					'seconds' => (int) $p['seconds'],
+				);
+			}
+		}
+
+		$days = (int) PQAnalytics_Settings::get( 'retention_days' );
+		return array(
+			'total'      => (int) $visitor['visits'],
+			'kept'       => count( $out ),
+			'first_seen' => self::local( $visitor['first_seen'], 'M j, Y' ),
+			'days'       => $days > 0 ? $days : 90,
+			'visits'     => $out,
+			'pages'      => $top,
+		);
 	}
 
 	public static function path( $visit_id ) {
@@ -639,21 +981,39 @@ class PQAnalytics_Stats {
 		return $out;
 	}
 
-	public static function export_rows( $days ) {
+	public static function export_rows( $days, $filter = null, $search = '', $opts = null ) {
 		global $wpdb;
 		$visits   = PQAnalytics_DB::table( 'visits' );
 		$visitors = PQAnalytics_DB::table( 'visitors' );
 		$hits     = PQAnalytics_DB::table( 'hits' );
 		$start    = self::day_start_utc( max( 1, (int) $days ) - 1 );
-		$rows     = $wpdb->get_results(
-			$wpdb->prepare(
-				'SELECT vs.*, vr.first_seen, vr.name, vr.email, vr.phone, vr.label FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE vs.started >= %s ORDER BY vs.started DESC LIMIT 50000',
-				$visits,
-				$visitors,
-				$start
-			),
-			ARRAY_A
-		);
+		if ( null === $opts ) {
+			$rows = $wpdb->get_results(
+				$wpdb->prepare(
+					'SELECT vs.*, vr.first_seen, vr.visits AS visits_total, vr.name, vr.email, vr.phone, vr.label FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE vs.started >= %s ORDER BY vs.started DESC LIMIT 50000',
+					$visits,
+					$visitors,
+					$start
+				),
+				ARRAY_A
+			);
+		} else {
+			$o      = self::search_opts( $opts );
+			$clause = self::search_clause( $filter, $search, $o );
+			$where  = $clause['sql'];
+			$args   = $clause['args'];
+			if ( '' === $o['from'] && '' === $o['to'] ) {
+				$where .= ' AND vs.started >= %s';
+				$args[] = $start;
+			}
+			$rows = $wpdb->get_results(
+				$wpdb->prepare(
+					'SELECT vs.*, vr.first_seen, vr.visits AS visits_total, vr.name, vr.email, vr.phone, vr.label FROM %i vs LEFT JOIN %i vr ON vr.id = vs.visitor_id WHERE ' . $where . ' ORDER BY vs.started DESC LIMIT 50000',
+					array_merge( array( $visits, $visitors ), $args )
+				),
+				ARRAY_A
+			);
+		}
 		if ( ! is_array( $rows ) ) {
 			return array();
 		}

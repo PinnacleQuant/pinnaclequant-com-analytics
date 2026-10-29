@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name:       PinnacleQuant.com Analytics
+ * Plugin Name:       Live Visitor Analytics – Real-Time Visitor Tracking, IP Address & Location
  * Plugin URI:        https://pinnaclequant.com/analytics-systems/
  * Description:       See who is on your site right now: IP address, city and state, ISP, screen size, browser, where they came from, returning visitors, the pages they read, and one-click blocking. Everything stays in your own database.
- * Version:           1.7.8
+ * Version:           1.9.7
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            PinnacleQuant.com
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PQANALYTICS_VERSION', '1.7.8' );
+define( 'PQANALYTICS_VERSION', '1.9.7' );
 define( 'PQANALYTICS_DB_VERSION', '9' );
 define( 'PQANALYTICS_FILE', __FILE__ );
 define( 'PQANALYTICS_DIR', plugin_dir_path( __FILE__ ) );
@@ -43,6 +43,7 @@ require_once PQANALYTICS_DIR . 'includes/class-pqanalytics-admin.php';
 require_once PQANALYTICS_DIR . 'includes/class-pqanalytics-admin-api.php';
 require_once PQANALYTICS_DIR . 'includes/class-pqanalytics-cron.php';
 require_once PQANALYTICS_DIR . 'includes/class-pqanalytics-report.php';
+require_once PQANALYTICS_DIR . 'includes/class-pqanalytics-fast.php';
 
 function pqanalytics_geo_state() {
 	wp_unschedule_hook( 'pqanalytics_geo_auto' );
@@ -111,3 +112,26 @@ function pqanalytics_init() {
 	PQAnalytics_Admin_API::init();
 }
 add_action( 'plugins_loaded', 'pqanalytics_init' );
+PQAnalytics_Fast::init();
+
+/**
+ * On the plugin's own admin pages, WordPress's Heartbeat (admin-ajax.php)
+ * runs once every 10 minutes instead of every 1 to 2 minutes. The pages
+ * refresh through their own calls and do not use Heartbeat.
+ */
+function pqanalytics_heartbeat_settings( $settings ) {
+	if ( ! is_admin() || ! isset( $_GET['page'] ) ) {
+		return $settings;
+	}
+	$page = sanitize_key( wp_unslash( $_GET['page'] ) );
+	if ( 0 !== strpos( $page, 'pqanalytics-' ) ) {
+		return $settings;
+	}
+	if ( ! is_array( $settings ) ) {
+		$settings = array();
+	}
+	$settings['interval']        = 120;
+	$settings['minimalInterval'] = 600;
+	return $settings;
+}
+add_filter( 'heartbeat_settings', 'pqanalytics_heartbeat_settings' );

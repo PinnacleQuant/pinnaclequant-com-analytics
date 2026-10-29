@@ -207,20 +207,53 @@
 	});
 
 	if (A.screen === 'visitors') {
-		var state = { filter: 'all', search: '', page: 1, timer: null, busy: false, expanded: {} };
+		var state = { filter: 'all', search: '', page: 1, timer: null, busy: false, expanded: {}, history: {}, charts: 0, in: 'all', unique: 0, page1: '', page2: '', from: '', to: '', tfrom: '', tto: '' };
+		var chartsEvery = A.chartsEvery || 300000;
+
+		function filterQuery() {
+			return 'filter=' + encodeURIComponent(state.filter) + '&search=' + encodeURIComponent(state.search) + '&in=' + encodeURIComponent(state.in) + '&unique=' + (state.unique ? 1 : 0) +
+				'&page1=' + encodeURIComponent(state.page1) + '&page2=' + encodeURIComponent(state.page2) + '&from=' + encodeURIComponent(state.from) + '&to=' + encodeURIComponent(state.to) +
+				'&tfrom=' + encodeURIComponent(state.tfrom) + '&tto=' + encodeURIComponent(state.tto);
+		}
+
+		function hasFilters() {
+			return !!(state.search || state.unique || state.page1 || state.page2 || state.from || state.to || state.tfrom || state.tto || state.filter !== 'all');
+		}
+
+		function updateExport() {
+			var link = qs('#pqanalytics-export');
+			if (!link || !A.exportUrl) {
+				return;
+			}
+			link.href = hasFilters() ? A.exportUrl + '&' + filterQuery() : A.exportUrl;
+			link.textContent = !hasFilters() ? T.export30 : ((state.from || state.to) ? T.exportF : T.exportF30);
+		}
+
+		function updateZone(z) {
+			var el = qs('#pqanalytics-zone');
+			if (!el || !z) {
+				return;
+			}
+			el.textContent = T.timesIn.replace('%s', z.name + (z.abbr ? ' (' + z.abbr + ')' : ''));
+		}
 
 		function loadOverview() {
 			if (state.busy) {
 				return;
 			}
 			state.busy = true;
-			var q = 'overview?filter=' + encodeURIComponent(state.filter) + '&search=' + encodeURIComponent(state.search) + '&page=' + state.page;
+			var full = !state.charts || Date.now() - state.charts >= chartsEvery;
+			var q = 'overview?' + filterQuery() + '&page=' + state.page + (full ? '' : '&light=1') + (pathsLoaded ? '' : '&paths=1');
 			api(q).then(function (d) {
 				renderCards(d.cards);
 				if (d.hourly) { renderHourly(d.hourly); }
 				if (d.daily) { renderDaily(d.daily); }
 				if (d.screens) { renderScreens(d.screens); }
+				if (d.paths) { pathsLoaded = renderPaths(d.paths); }
+				if (d.hourly && d.daily && d.screens) { state.charts = Date.now(); }
 				renderVisitors(d.visitors);
+				updateZone(d.visitors && d.visitors.zone);
+				updateExport();
 				refreshExpanded();
 				var u = qs('#pqanalytics-updated');
 				if (u) {
@@ -312,6 +345,24 @@
 			}
 		}
 
+		var pathsLoaded = false;
+		function renderPaths(paths) {
+			var list = qs('#pqanalytics-paths');
+			if (!list) {
+				return true;
+			}
+			var active = document.activeElement;
+			if (active && (active.id === 'pqanalytics-page1' || active.id === 'pqanalytics-page2')) {
+				return false;
+			}
+			var html = '';
+			paths.forEach(function (p) {
+				html += '<option value="' + esc(p.p) + '" label="' + esc(p.n === 1 ? T.visit1 : T.visitsN.replace('%s', fmt(p.n))) + '"></option>';
+			});
+			list.innerHTML = html;
+			return true;
+		}
+
 		function visitorCell(r) {
 			if (r.is_bot) {
 				return '<span class="pqanalytics-tag pqanalytics-tag-bot">' + esc(r.bot_name || 'Bot') + '</span>';
@@ -326,10 +377,17 @@
 			if (r.email) {
 				out += '<span class="pqanalytics-muted">' + esc(r.email) + '</span><br>';
 			}
+			var total = Math.max(parseInt(r.visits_total, 10) || 0, r.visit_no);
 			if (r.visit_no > 1) {
-				out += '<span class="pqanalytics-tag pqanalytics-tag-returning">' + T.returning + '</span><div class="pqanalytics-muted">' + T.visit + ' #' + r.visit_no + (r.first_seen ? ', ' + T.firstSeen + ' ' + esc(r.first_seen) : '') + '</div>';
+				out += '<span class="pqanalytics-tag pqanalytics-tag-returning">' + T.returning + '</span>';
 			} else {
 				out += '<span class="pqanalytics-tag pqanalytics-tag-new">' + T.new + '</span>';
+			}
+			if (total > 1) {
+				out += '<div class="pqanalytics-muted">' + T.visitOf.replace('%1$s', fmt(r.visit_no)).replace('%2$s', fmt(total)) + (r.first_seen ? ', ' + T.firstSeen + ' ' + esc(r.first_seen) : '') + '</div>';
+				if (r.vid) {
+					out += '<button type="button" class="button-link pqanalytics-history" data-vid="' + esc(r.vid) + '" data-id="' + r.id + '">' + (state.history[r.id] ? T.hidePast : T.pastVisits) + '</button>';
+				}
 			}
 			return out;
 		}
@@ -471,7 +529,7 @@
 				return;
 			}
 			if (!v.rows.length) {
-				body.innerHTML = '<tr><td colspan="10" class="pqanalytics-empty">' + (state.filter === 'all' && !state.search ? T.noRows : T.noRowsF) + '</td></tr>';
+				body.innerHTML = '<tr><td colspan="10" class="pqanalytics-empty">' + (!hasFilters() ? T.noRows : T.noRowsF) + '</td></tr>';
 			} else {
 				var html = '';
 				v.rows.forEach(function (r) {
@@ -489,6 +547,9 @@
 						'</tr>';
 					if (state.expanded[r.id]) {
 						html += '<tr class="pqanalytics-path-row" data-for="' + r.id + '"><td colspan="10">' + state.expanded[r.id] + '</td></tr>';
+					}
+					if (state.history[r.id]) {
+						html += '<tr class="pqanalytics-history-row" data-for="' + r.id + '"><td colspan="10">' + state.history[r.id] + '</td></tr>';
 					}
 				});
 				body.innerHTML = html;
@@ -538,9 +599,91 @@
 			return html + '</ol>';
 		}
 
+		function sub(s, a, b) {
+			return String(s).replace('%1$s', a).replace('%2$s', b).replace('%s', a);
+		}
+
+		function spent(seconds) {
+			seconds = parseInt(seconds, 10) || 0;
+			if (seconds < 60) {
+				return seconds + T.seconds;
+			}
+			return Math.round(seconds / 60) + ' ' + T.minutes;
+		}
+
+		function historyHtml(d, currentId) {
+			var html = '<div class="pqanalytics-history">';
+			html += '<p class="pqanalytics-history-head"><strong>' + esc(sub(T.visitsSince, fmt(d.total), d.first_seen)) + '</strong>';
+			if (d.kept < d.total) {
+				html += ' <span class="pqanalytics-muted">' + esc(sub(T.keptNote, fmt(d.days), fmt(d.kept))) + '</span>';
+			}
+			html += '</p>';
+			if (d.pages && d.pages.length) {
+				html += '<div class="pqanalytics-history-block"><div class="pqanalytics-history-title">' + esc(T.topPages) + '</div><ol class="pqanalytics-top-pages">';
+				d.pages.forEach(function (p) {
+					var label = pathLabel(pathOf(p.url || p.path, true), p.url || p.path);
+					html += '<li><a href="' + esc(p.url) + '" target="_blank" rel="noopener">' + esc(label) + '</a>' +
+						(p.title ? ' <span class="pqanalytics-muted">' + esc(p.title) + '</span>' : '') +
+						' <span class="pqanalytics-history-count">' + esc(sub(T.inVisits, fmt(p.visits), fmt(d.kept))) + ', ' + fmt(p.views) + ' ' + (p.views === 1 ? T.view : T.views) + ', ' + esc(spent(p.seconds)) + ' ' + T.totalTime + '</span></li>';
+				});
+				html += '</ol></div>';
+			}
+			html += '<div class="pqanalytics-history-block"><div class="pqanalytics-history-title">' + esc(T.eachVisit) + '</div>';
+			d.visits.forEach(function (v) {
+				var current = v.id === currentId;
+				html += '<div class="pqanalytics-history-visit' + (current ? ' pqanalytics-history-current' : '') + '">';
+				html += '<div class="pqanalytics-history-when"><strong>' + esc(v.date) + ', ' + esc(v.time) + '</strong> <span class="pqanalytics-muted">' + T.visit + ' #' + v.visit_no + (current ? ' (' + T.thisVisit + ')' : '') + ', ' + esc(spent(v.seconds)) + ', ' + fmt(v.pages) + ' ' + (v.pages === 1 ? T.page : T.pages) +
+					(v.source ? ', ' + T.from + ' ' + esc(v.source) : '') + (v.keyword ? ' (' + esc(v.keyword) + ')' : '') + (v.campaign ? ', ' + T.campaign + ' ' + esc(v.campaign) : '') +
+					(v.location ? ', ' + esc(v.location) : '') + (v.screen ? ', ' + esc(v.screen) : '') + (v.browser ? ', ' + esc(v.browser) : '') + (v.os ? ', ' + esc(v.os) : '') + '</span></div>';
+				if (v.hits.length) {
+					html += '<ol class="pqanalytics-path-list">';
+					v.hits.forEach(function (h) {
+						var p = pathLabel(pathOf(h.url, true), h.url);
+						html += '<li><span class="pqanalytics-muted">' + esc(h.time) + '</span> <a href="' + esc(h.url) + '" target="_blank" rel="noopener">' + esc(p) + '</a>' +
+							(h.title ? ' <span class="pqanalytics-muted">' + esc(h.title) + '</span>' : '') +
+							(h.duration ? ' <span class="pqanalytics-muted">' + h.duration + T.seconds + '</span>' : '') + '</li>';
+					});
+					html += '</ol>';
+					if (v.more > 0) {
+						html += '<div class="pqanalytics-muted">' + esc(sub(T.morePages, fmt(v.more))) + '</div>';
+					}
+				}
+				html += '</div>';
+			});
+			html += '</div></div>';
+			return html;
+		}
+
 		document.addEventListener('click', function (e) {
 			var t = e.target;
 			if (!t.closest) {
+				return;
+			}
+			var histBtn = t.closest('.pqanalytics-history');
+			if (histBtn) {
+				var hid = histBtn.getAttribute('data-id');
+				var hvid = histBtn.getAttribute('data-vid');
+				var hrow = qs('.pqanalytics-history-row[data-for="' + hid + '"]');
+				if (hrow) {
+					hrow.parentNode.removeChild(hrow);
+					delete state.history[hid];
+					histBtn.textContent = T.pastVisits;
+					return;
+				}
+				histBtn.disabled = true;
+				api('visitor/' + hvid + '/history').then(function (d) {
+					histBtn.disabled = false;
+					var row = histBtn.closest('tr');
+					var html = historyHtml(d, parseInt(hid, 10));
+					state.history[hid] = html;
+					histBtn.textContent = T.hidePast;
+					var tr = document.createElement('tr');
+					tr.className = 'pqanalytics-history-row';
+					tr.setAttribute('data-for', hid);
+					tr.innerHTML = '<td colspan="10">' + html + '</td>';
+					var after = qs('.pqanalytics-path-row[data-for="' + hid + '"]') || row;
+					after.parentNode.insertBefore(tr, after.nextSibling);
+				}).catch(function (err) { histBtn.disabled = false; window.alert(err.message || T.error); });
 				return;
 			}
 			var filter = t.closest('.pqanalytics-filter');
@@ -609,15 +752,62 @@
 		});
 
 		var search = qs('#pqanalytics-search');
-		if (search) {
-			var debounce = null;
-			search.addEventListener('input', function () {
+		var debounce = null;
+		function reload() {
+			clearTimeout(debounce);
+			if (state.busy) {
+				debounce = setTimeout(reload, 300);
+				return;
+			}
+			loadOverview();
+		}
+		function typed(el, key) {
+			if (!el) {
+				return;
+			}
+			el.addEventListener('input', function () {
+				state[key] = el.value;
+				state.page = 1;
 				clearTimeout(debounce);
-				debounce = setTimeout(function () {
-					state.search = search.value;
-					state.page = 1;
-					loadOverview();
-				}, 400);
+				debounce = setTimeout(reload, 400);
+			});
+		}
+		function picked(el, key, read) {
+			if (!el) {
+				return;
+			}
+			el.addEventListener('change', function () {
+				state[key] = read ? read(el) : el.value;
+				state.page = 1;
+				reload();
+			});
+		}
+		typed(search, 'search');
+		typed(qs('#pqanalytics-page1'), 'page1');
+		typed(qs('#pqanalytics-page2'), 'page2');
+		picked(qs('#pqanalytics-in'), 'in');
+		picked(qs('#pqanalytics-unique'), 'unique', function (el) { return el.checked ? 1 : 0; });
+		picked(qs('#pqanalytics-from'), 'from');
+		picked(qs('#pqanalytics-to'), 'to');
+		picked(qs('#pqanalytics-tfrom'), 'tfrom');
+		picked(qs('#pqanalytics-tto'), 'tto');
+		var clear = qs('#pqanalytics-clear');
+		if (clear) {
+			clear.addEventListener('click', function () {
+				['search', 'page1', 'page2', 'from', 'to', 'tfrom', 'tto'].forEach(function (key) {
+					state[key] = '';
+					var el = qs('#pqanalytics-' + (key === 'search' ? 'search' : key));
+					if (el) {
+						el.value = '';
+					}
+				});
+				state.in = 'all';
+				state.unique = 0;
+				var sel = qs('#pqanalytics-in'), un = qs('#pqanalytics-unique');
+				if (sel) { sel.value = 'all'; }
+				if (un) { un.checked = false; }
+				state.page = 1;
+				reload();
 			});
 		}
 

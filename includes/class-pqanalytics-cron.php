@@ -6,12 +6,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 class PQAnalytics_Cron {
 
 	const PRUNE_HOOK   = 'pqanalytics_daily_prune';
+	const MORE_HOOK    = 'pqanalytics_prune_more';
 	const REFRESH_HOOK = 'pqanalytics_geo_refresh';
 	const RESUME_HOOK  = 'pqanalytics_geo_resume';
 	const FINISH_HOOK  = 'pqanalytics_geo_finish';
+	const BATCH        = 2000;
+	const PRUNE_SECONDS = 20;
 
 	public static function init() {
 		add_action( self::PRUNE_HOOK, array( __CLASS__, 'prune' ) );
+		add_action( self::MORE_HOOK, array( __CLASS__, 'prune' ) );
 		add_action( self::REFRESH_HOOK, array( __CLASS__, 'refresh' ) );
 		add_action( self::RESUME_HOOK, array( __CLASS__, 'resume' ), 10, 2 );
 		add_action( self::FINISH_HOOK, array( __CLASS__, 'finish' ) );
@@ -43,24 +47,78 @@ class PQAnalytics_Cron {
 	}
 
 	public static function unschedule() {
-		foreach ( array( self::PRUNE_HOOK, self::REFRESH_HOOK, self::RESUME_HOOK, self::FINISH_HOOK, 'pqanalytics_geo_auto' ) as $hook ) {
+		foreach ( array( self::PRUNE_HOOK, self::MORE_HOOK, self::REFRESH_HOOK, self::RESUME_HOOK, self::FINISH_HOOK, 'pqanalytics_geo_auto' ) as $hook ) {
 			wp_unschedule_hook( $hook );
 		}
 		PQAnalytics_Report::unschedule();
 	}
 
 	public static function prune() {
-		global $wpdb;
 		PQAnalytics_DB::cleanup_stale_names();
-		$days   = (int) PQAnalytics_Settings::get( 'retention_days' );
-		$days   = $days > 0 ? $days : 90;
-		$cutoff = gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS );
-		$visits = PQAnalytics_DB::table( 'visits' );
-		$hits   = PQAnalytics_DB::table( 'hits' );
+		$days     = (int) PQAnalytics_Settings::get( 'retention_days' );
+		$days     = $days > 0 ? $days : 90;
+		$cutoff   = gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS );
+		$deadline = time() + self::PRUNE_SECONDS;
 
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE visit_id IN (SELECT id FROM %i WHERE started < %s)', $hits, $visits, $cutoff ) );
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE started < %s', $visits, $cutoff ) );
-		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE NOT EXISTS (SELECT 1 FROM %i v WHERE v.id = %i.visit_id)', $hits, $visits, $hits ) );
+		$done = self::prune_rows( PQAnalytics_DB::table( 'hits' ), 'hit_time', $cutoff, $deadline )
+			&& self::prune_rows( PQAnalytics_DB::table( 'visits' ), 'started', $cutoff, $deadline )
+			&& self::prune_visitors( $cutoff, $deadline );
+
+		if ( ! $done && ! wp_next_scheduled( self::MORE_HOOK ) ) {
+			wp_schedule_single_event( time() + 5 * MINUTE_IN_SECONDS, self::MORE_HOOK );
+		}
+	}
+
+	private static function delete_ids( $table, $ids ) {
+		global $wpdb;
+		$ids = array_values( array_filter( array_map( 'intval', (array) $ids ) ) );
+		if ( empty( $ids ) ) {
+			return;
+		}
+		$wpdb->query(
+			$wpdb->prepare(
+				'DELETE FROM %i WHERE id IN (' . implode( ',', array_fill( 0, count( $ids ), '%d' ) ) . ')',
+				array_merge( array( $table ), $ids )
+			)
+		);
+	}
+
+	private static function prune_rows( $table, $column, $cutoff, $deadline ) {
+		global $wpdb;
+		do {
+			$ids = $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM %i WHERE %i < %s LIMIT %d', $table, $column, $cutoff, self::BATCH ) );
+			if ( empty( $ids ) ) {
+				return true;
+			}
+			self::delete_ids( $table, $ids );
+			if ( count( $ids ) < self::BATCH ) {
+				return true;
+			}
+		} while ( time() < $deadline );
+		return false;
+	}
+
+	private static function prune_visitors( $cutoff, $deadline ) {
+		global $wpdb;
+		$table = PQAnalytics_DB::table( 'visitors' );
+		do {
+			$ids = $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT id FROM %i WHERE last_seen < %s AND name = '' AND email = '' AND phone = '' AND label = '' AND (notes IS NULL OR notes = '') LIMIT %d",
+					$table,
+					$cutoff,
+					self::BATCH
+				)
+			);
+			if ( empty( $ids ) ) {
+				return true;
+			}
+			self::delete_ids( $table, $ids );
+			if ( count( $ids ) < self::BATCH ) {
+				return true;
+			}
+		} while ( time() < $deadline );
+		return false;
 	}
 
 	public static function finish() {

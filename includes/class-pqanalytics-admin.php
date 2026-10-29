@@ -147,16 +147,25 @@ class PQAnalytics_Admin {
 				'nonce'       => wp_create_nonce( 'wp_rest' ),
 				'screen'      => $screen,
 				'refresh'     => 15000,
+				'chartsEvery' => 300000,
 				'liveSeconds' => PQANALYTICS_LIVE_SECONDS,
 				'chatUrl'     => esc_url_raw( apply_filters( 'pqanalytics_row_chat_url', admin_url( 'admin.php?page=' . self::SLUG_CHAT ) ) ),
 				'chatByVid'   => (bool) apply_filters( 'pqanalytics_row_chat_by_vid', false ),
 				'canBlock'    => current_user_can( 'manage_options' ),
+				'exportUrl'   => current_user_can( 'manage_options' ) ? esc_url_raw( wp_nonce_url( admin_url( 'admin-post.php?action=pqanalytics_export&days=30' ), 'pqanalytics_export' ) ) : '',
 				'i18n'        => array(
 					'live'         => __( 'Live', 'pinnaclequant-com-analytics' ),
 					'new'          => __( 'New', 'pinnaclequant-com-analytics' ),
 					'returning'    => __( 'Returning', 'pinnaclequant-com-analytics' ),
 					'member'       => __( 'Member', 'pinnaclequant-com-analytics' ),
 					'visit'        => __( 'visit', 'pinnaclequant-com-analytics' ),
+					'visitOf'      => __( 'Visit %1$s of %2$s', 'pinnaclequant-com-analytics' ),
+					'visitsN'      => __( '%s visits', 'pinnaclequant-com-analytics' ),
+					'visit1'       => __( '1 visit', 'pinnaclequant-com-analytics' ),
+					'timesIn'      => __( 'Times in %s', 'pinnaclequant-com-analytics' ),
+					'export30'     => __( 'Export CSV (30 days)', 'pinnaclequant-com-analytics' ),
+					'exportF30'    => __( 'Export CSV (these results, 30 days)', 'pinnaclequant-com-analytics' ),
+					'exportF'      => __( 'Export CSV (these results)', 'pinnaclequant-com-analytics' ),
 					'firstSeen'    => __( 'first seen', 'pinnaclequant-com-analytics' ),
 					'block'        => __( 'Block from site', 'pinnaclequant-com-analytics' ),
 					'blocked'      => __( 'Blocked', 'pinnaclequant-com-analytics' ),
@@ -196,6 +205,20 @@ class PQAnalytics_Admin {
 					'geoFailed'    => __( 'The download did not finish. Click the button to try again.', 'pinnaclequant-com-analytics' ),
 					'geoWaiting'   => __( 'Another download is running', 'pinnaclequant-com-analytics' ),
 					'visits'       => __( 'visits', 'pinnaclequant-com-analytics' ),
+					'pastVisits'   => __( 'Past visits', 'pinnaclequant-com-analytics' ),
+					'hidePast'     => __( 'Hide past visits', 'pinnaclequant-com-analytics' ),
+					'thisVisit'    => __( 'this visit', 'pinnaclequant-com-analytics' ),
+					'visitsSince'  => __( '%1$s visits since %2$s', 'pinnaclequant-com-analytics' ),
+					'keptNote'     => __( 'Details are kept for %1$s days, so the pages of %2$s visits are shown.', 'pinnaclequant-com-analytics' ),
+					'topPages'     => __( 'Pages this visitor opens most', 'pinnaclequant-com-analytics' ),
+					'inVisits'     => __( 'in %1$s of %2$s visits', 'pinnaclequant-com-analytics' ),
+					'views'        => __( 'views', 'pinnaclequant-com-analytics' ),
+					'view'         => __( 'view', 'pinnaclequant-com-analytics' ),
+					'totalTime'    => __( 'total', 'pinnaclequant-com-analytics' ),
+					'eachVisit'    => __( 'Each visit, newest first', 'pinnaclequant-com-analytics' ),
+					'morePages'    => __( '+%s more pages', 'pinnaclequant-com-analytics' ),
+					'from'         => __( 'from', 'pinnaclequant-com-analytics' ),
+					'minutes'      => __( 'min', 'pinnaclequant-com-analytics' ),
 					'capped'       => __( 'Common paths are based on the most recent 60,000 page views in this range.', 'pinnaclequant-com-analytics' ),
 					'minSec'       => __( 'm', 'pinnaclequant-com-analytics' ),
 					/* translators: 1: bounce rate today, 2: bounce rate over the last 7 days */
@@ -281,6 +304,7 @@ class PQAnalytics_Admin {
 		$tz         = self::tz_label();
 		$export_url = wp_nonce_url( admin_url( 'admin-post.php?action=pqanalytics_export&days=30' ), 'pqanalytics_export' );
 		$geo_ready  = PQAnalytics_Geo::has( 'city' ) && PQAnalytics_Geo::has( 'asn' );
+		$zone       = PQAnalytics_Stats::zone_info();
 		?>
 		<div class="wrap pqanalytics-wrap" id="pqanalytics-app">
 			<h1><?php esc_html_e( 'Visitors', 'pinnaclequant-com-analytics' ); ?></h1>
@@ -337,10 +361,33 @@ class PQAnalytics_Admin {
 					<button type="button" class="button pqanalytics-filter" data-filter="bots"><?php esc_html_e( 'Bots', 'pinnaclequant-com-analytics' ); ?></button>
 				</div>
 				<label class="screen-reader-text" for="pqanalytics-search"><?php esc_html_e( 'Search visitors', 'pinnaclequant-com-analytics' ); ?></label>
-				<input type="search" id="pqanalytics-search" placeholder="<?php esc_attr_e( 'IP, city, state, ISP, source, page, name', 'pinnaclequant-com-analytics' ); ?>">
+				<input type="search" id="pqanalytics-search" placeholder="<?php esc_attr_e( 'IP, city, ISP, page, name, note, member', 'pinnaclequant-com-analytics' ); ?>">
+				<label class="screen-reader-text" for="pqanalytics-in"><?php esc_html_e( 'Where to search', 'pinnaclequant-com-analytics' ); ?></label>
+				<select id="pqanalytics-in">
+					<option value="all"><?php esc_html_e( 'Search everything', 'pinnaclequant-com-analytics' ); ?></option>
+					<option value="note"><?php esc_html_e( 'Search the Note only', 'pinnaclequant-com-analytics' ); ?></option>
+				</select>
+				<label class="pqanalytics-check" for="pqanalytics-unique" title="<?php esc_attr_e( 'One row per visitor: the latest visit that matches', 'pinnaclequant-com-analytics' ); ?>"><input type="checkbox" id="pqanalytics-unique" value="1"> <?php esc_html_e( 'Unique visitors', 'pinnaclequant-com-analytics' ); ?></label>
 				<?php if ( current_user_can( 'manage_options' ) ) : ?>
-				<a class="button" href="<?php echo esc_url( $export_url ); ?>"><?php esc_html_e( 'Export CSV (30 days)', 'pinnaclequant-com-analytics' ); ?></a>
+				<a class="button" id="pqanalytics-export" href="<?php echo esc_url( $export_url ); ?>"><?php esc_html_e( 'Export CSV (30 days)', 'pinnaclequant-com-analytics' ); ?></a>
 				<?php endif; ?>
+			</div>
+			<div class="pqanalytics-toolbar pqanalytics-toolbar-more">
+				<span class="pqanalytics-pair">
+					<label for="pqanalytics-page1"><?php esc_html_e( 'Visited page', 'pinnaclequant-com-analytics' ); ?> <input type="text" id="pqanalytics-page1" list="pqanalytics-paths" autocomplete="off" placeholder="<?php esc_attr_e( 'e.g. /pricing', 'pinnaclequant-com-analytics' ); ?>"></label>
+					<label for="pqanalytics-page2"><?php esc_html_e( 'then visited page', 'pinnaclequant-com-analytics' ); ?> <input type="text" id="pqanalytics-page2" list="pqanalytics-paths" autocomplete="off" placeholder="<?php esc_attr_e( 'e.g. /contact', 'pinnaclequant-com-analytics' ); ?>"></label>
+					<datalist id="pqanalytics-paths"></datalist>
+				</span>
+				<span class="pqanalytics-pair">
+					<label for="pqanalytics-from"><?php esc_html_e( 'Days', 'pinnaclequant-com-analytics' ); ?> <input type="date" id="pqanalytics-from"></label>
+					<label for="pqanalytics-to"><?php esc_html_e( 'to', 'pinnaclequant-com-analytics' ); ?> <input type="date" id="pqanalytics-to"></label>
+				</span>
+				<span class="pqanalytics-pair">
+					<label for="pqanalytics-tfrom"><?php esc_html_e( 'Time of day', 'pinnaclequant-com-analytics' ); ?> <input type="time" id="pqanalytics-tfrom"></label>
+					<label for="pqanalytics-tto"><?php esc_html_e( 'to', 'pinnaclequant-com-analytics' ); ?> <input type="time" id="pqanalytics-tto"></label>
+				</span>
+				<span class="pqanalytics-muted" id="pqanalytics-zone"><?php echo esc_html( sprintf( __( 'Times in %s', 'pinnaclequant-com-analytics' ), $zone['name'] . ( '' !== $zone['abbr'] ? ' (' . $zone['abbr'] . ')' : '' ) ) ); ?></span>
+				<button type="button" class="button" id="pqanalytics-clear"><?php esc_html_e( 'Clear filters', 'pinnaclequant-com-analytics' ); ?></button>
 			</div>
 
 			<div class="pqanalytics-table-card">
@@ -539,7 +586,7 @@ class PQAnalytics_Admin {
 					</tr>
 					<tr>
 						<th scope="row"><label for="pqanalytics-retention"><?php esc_html_e( 'Keep visit details for', 'pinnaclequant-com-analytics' ); ?></label></th>
-						<td><input type="number" id="pqanalytics-retention" min="1" max="3650" name="<?php echo esc_attr( PQAnalytics_Settings::OPTION ); ?>[retention_days]" value="<?php echo esc_attr( $s['retention_days'] ); ?>"> <?php esc_html_e( 'days. Older visits are removed once a day.', 'pinnaclequant-com-analytics' ); ?></td>
+						<td><input type="number" id="pqanalytics-retention" min="1" max="3650" name="<?php echo esc_attr( PQAnalytics_Settings::OPTION ); ?>[retention_days]" value="<?php echo esc_attr( $s['retention_days'] ); ?>"> <?php esc_html_e( 'days. Older visits are removed once a day. A visitor record with no visit left is removed too, unless it carries a name, email, phone or note.', 'pinnaclequant-com-analytics' ); ?></td>
 					</tr>
 					<tr>
 						<th scope="row"><label for="pqanalytics-beat"><?php esc_html_e( 'Hosting resources', 'pinnaclequant-com-analytics' ); ?></label></th>
@@ -639,7 +686,14 @@ class PQAnalytics_Admin {
 		}
 		check_admin_referer( 'pqanalytics_export' );
 		$days = isset( $_GET['days'] ) ? max( 1, min( 3650, (int) $_GET['days'] ) ) : 30;
-		$rows = PQAnalytics_Stats::export_rows( $days );
+		if ( isset( $_GET['filter'] ) ) {
+			$filter = sanitize_key( wp_unslash( $_GET['filter'] ) );
+			$search = isset( $_GET['search'] ) ? sanitize_text_field( wp_unslash( $_GET['search'] ) ) : '';
+			$opts   = PQAnalytics_Admin_API::search_params( wp_unslash( $_GET ) );
+			$rows   = PQAnalytics_Stats::export_rows( $days, $filter, $search, $opts );
+		} else {
+			$rows = PQAnalytics_Stats::export_rows( $days );
+		}
 
 		nocache_headers();
 		header( 'Content-Type: text/csv; charset=utf-8' );

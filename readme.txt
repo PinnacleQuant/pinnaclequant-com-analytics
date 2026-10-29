@@ -1,18 +1,18 @@
-=== PinnacleQuant.com Analytics ===
+=== Live Visitor Analytics – Real-Time Visitor Tracking, IP Address & Location ===
 Contributors: pinnaclequant
-Tags: analytics, visitors, statistics, live visitors, geolocation
+Tags: analytics, live visitors, visitor tracking, statistics, self-hosted
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.7.8
+Stable tag: 1.9.7
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
-See who is on your site right now: IP address, city and state, ISP, screen size, browser, source and pages read. It all stays in your own database.
+See every visitor on your site right now: IP address, city, ISP, screen size, traffic source and pages read. Self-hosted, in your own database.
 
 == Description ==
 
-PinnacleQuant.com Analytics shows you the people on your site, one row per visitor, as they arrive.
+PinnacleQuant.com Analytics shows you, in real time, the people on your site, one row per visitor, as they arrive, with the traffic source of every visit. It is self-hosted visitor tracking: everything stays in your own WordPress database, with no account and no outside service. Open source, GPL.
 
 For each visitor you see:
 
@@ -114,6 +114,26 @@ This plugin keeps the IP address, approximate location, browser details, referri
 IP geolocation by DB-IP (https://db-ip.com), used under the Creative Commons Attribution 4.0 license.
 
 == Changelog ==
+
+= 1.9.7 =
+* Lighter on your hosting. The page signal and the heartbeat sent by your visitors' browsers, and the Visitors page's own 15-second refresh, are now answered as soon as WordPress has loaded its plugins, before your theme and the rest of WordPress start. Each call is still served by WordPress's own REST server code with its usual checks (sign-in, security token, permissions, and the filters other plugins add to the REST API); the same details are saved and shown; each call takes much less of your server's time. A call that does not match exactly is answered by WordPress the usual way, as before.
+* On the plugin's own pages, WordPress's built-in Heartbeat check (admin-ajax.php) runs once every 10 minutes instead of every minute or two. The Visitors page does not use it; it keeps refreshing every 15 seconds on its own.
+
+= 1.9.3 =
+* Search box: type member to list every visit made by a logged-in member of your site. Members are counted only when Leave out logged-in users is unticked under Settings.
+* Visitors page: find visits by the pages read. Type a page address in Visited page to see every visit that opened it, and a second address in then visited page to see only the visits that went from the first page to the second, in that order. Part of an address is enough. Both boxes suggest page addresses as you type: every page address visited in the retention period, most visited first, each with its number of visits; the list is built once when the page opens.
+* Unique visitors: tick it and each visitor appears once, with their latest visit that matches. Untick it and every visit is listed; each row now says which visit it is, for example Visit 3 of 8.
+* Search the Note only: a choice next to the search box limits the search to the note you keep on a visitor.
+* Days and Time of day: limit the list to the days you pick, and to a time window that applies to every one of those days, for example 6:30 AM to 12:30 PM. Times follow the Time zone under Settings, and the zone and its abbreviation are printed next to the fields.
+* Export CSV follows the filters that are set: the file holds the rows you see, over the last 30 days unless you picked days.
+
+= 1.8.1 =
+* Past visits: a returning visitor's row now has a Past visits button. It opens the pages this visitor opens most, with how many of their visits included each page, and then every visit kept in the retention period, newest first, with its date, length, source and the pages read in order.
+* Fewer database writes on every page view and heartbeat: the plugin no longer keeps a request counter in the WordPress options table. Instead, each address can start at most 120 visits a minute, each visit keeps at most 60 pages a minute and 500 pages in all, and a page reports at most once every 3 seconds.
+* A visitor who stays on the site for a long time is no longer dropped from the Visitors page for a minute at a time.
+* The daily cleanup removes old visits in groups of 2,000 rows, so a large site is not held up while it runs, and it no longer re-reads the whole page-view table. When there is more to remove than fits in 20 seconds, it continues 5 minutes later.
+* The daily cleanup also removes visitor records that have no visit left in the retention period, unless they carry a name, email, phone, note or label.
+* The Visitors page refreshes its three charts (today by hour, last 30 days, screens) every 5 minutes instead of every 15 seconds. The cards, the rows and the green marks still refresh every 15 seconds.
 
 = 1.7.8 =
 * Traffic flow page: the Entry pages and Exit pages tables, and the two tables under Where visitors go next, now share the full width instead of leaving a third of it empty.

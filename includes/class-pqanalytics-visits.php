@@ -5,6 +5,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class PQAnalytics_Visits {
 
+	const MAX_NEW_VISITS_PER_MINUTE = 120;
+	const MAX_PAGES_PER_MINUTE      = 60;
+	const MAX_PAGES_PER_VISIT       = 500;
+	const MIN_BEAT_SECONDS          = 3;
+
 	public static function init() {
 		add_action( 'wp_enqueue_scripts', array( __CLASS__, 'enqueue' ) );
 		add_action( 'rest_api_init', array( __CLASS__, 'routes' ) );
@@ -147,13 +152,21 @@ class PQAnalytics_Visits {
 	}
 
 	public static function allow( $ip ) {
-		$key   = 'pqanalytics_rl_' . substr( md5( (string) $ip ), 0, 3 );
-		$count = (int) get_transient( $key );
-		if ( $count > 300 ) {
-			return false;
-		}
-		set_transient( $key, $count + 1, MINUTE_IN_SECONDS );
-		return true;
+		return '' !== (string) $ip;
+	}
+
+	public static function visit_allowed( $ip ) {
+		global $wpdb;
+		$visits = PQAnalytics_DB::table( 'visits' );
+		$since  = gmdate( 'Y-m-d H:i:s', time() - MINUTE_IN_SECONDS );
+		$count  = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i WHERE ip = %s AND started >= %s', $visits, $ip, $since ) );
+		return $count < self::MAX_NEW_VISITS_PER_MINUTE;
+	}
+
+	public static function page_allowed( $visit ) {
+		$age = max( 0, time() - (int) strtotime( $visit->started . ' UTC' ) );
+		$cap = min( self::MAX_PAGES_PER_VISIT, self::MAX_PAGES_PER_MINUTE * ( 1 + intdiv( $age, MINUTE_IN_SECONDS ) ) );
+		return (int) $visit->pages < $cap;
 	}
 
 	public static function ignored( $ip ) {
@@ -215,7 +228,7 @@ class PQAnalytics_Visits {
 		global $wpdb;
 
 		$ip = PQAnalytics_IP::current();
-		if ( self::ignored( $ip ) || ! self::allow( $ip ) ) {
+		if ( self::ignored( $ip ) ) {
 			return array( 'skip' => 1 );
 		}
 
@@ -255,13 +268,17 @@ class PQAnalytics_Visits {
 			$cutoff = gmdate( 'Y-m-d H:i:s', time() - PQANALYTICS_SESSION_MINUTES * 60 );
 			$visit  = $wpdb->get_row(
 				$wpdb->prepare(
-					'SELECT id FROM %i WHERE visitor_id = %d AND last_beat >= %s ORDER BY id DESC LIMIT 1',
+					'SELECT id, started, pages FROM %i WHERE visitor_id = %d AND last_beat >= %s ORDER BY id DESC LIMIT 1',
 					$visits,
 					$visitor->id,
 					$cutoff
 				)
 			);
-		} else {
+		}
+		if ( ! $visit && ! self::visit_allowed( $ip ) ) {
+			return array( 'skip' => 1 );
+		}
+		if ( ! $visitor ) {
 			$wpdb->insert(
 				$visitors,
 				array(
@@ -288,7 +305,8 @@ class PQAnalytics_Visits {
 			$visit_id  = (int) $visit->id;
 			$last      = $wpdb->get_row( $wpdb->prepare( 'SELECT id, path, hit_time, duration FROM %i WHERE visit_id = %d ORDER BY id DESC LIMIT 1', $hits, $visit_id ) );
 			$prev_path = $last ? (string) $last->path : '';
-			if ( $last && '' !== $path && $path === (string) $last->path && strtotime( $last->hit_time . ' UTC' ) + (int) $last->duration >= time() - PQANALYTICS_SAME_PAGE_SECONDS ) {
+			$same_page = $last && '' !== $path && $path === (string) $last->path && strtotime( $last->hit_time . ' UTC' ) + (int) $last->duration >= time() - PQANALYTICS_SAME_PAGE_SECONDS;
+			if ( $same_page || ! self::page_allowed( $visit ) ) {
 				$wpdb->query(
 					$wpdb->prepare(
 						'UPDATE %i SET last_beat = %s, last_url = %s, last_title = %s WHERE id = %d',
@@ -299,13 +317,13 @@ class PQAnalytics_Visits {
 						$visit_id
 					)
 				);
-				$wpdb->update( $visitors, array( 'last_seen' => $now ), array( 'id' => $visitor->id ), array( '%s' ), array( '%d' ) );
+				$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_seen = %s WHERE id = %d', $visitors, $now, $visitor->id ) );
 				if ( '' !== $member ) {
 					$wpdb->query( $wpdb->prepare( "UPDATE %i SET member = %s WHERE id = %d AND member = ''", $visits, $member, $visit_id ) );
 				}
 				return array(
 					'v' => $visit_id,
-					'h' => (int) $last->id,
+					'h' => $last ? (int) $last->id : 0,
 				);
 			}
 			$wpdb->query(
@@ -318,7 +336,7 @@ class PQAnalytics_Visits {
 					$visit_id
 				)
 			);
-			$wpdb->update( $visitors, array( 'last_seen' => $now ), array( 'id' => $visitor->id ), array( '%s' ), array( '%d' ) );
+			$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_seen = %s WHERE id = %d', $visitors, $now, $visitor->id ) );
 			if ( '' !== $member ) {
 				$wpdb->query( $wpdb->prepare( "UPDATE %i SET member = %s WHERE id = %d AND member = ''", $visits, $member, $visit_id ) );
 			}
@@ -416,7 +434,7 @@ class PQAnalytics_Visits {
 		}
 
 		$ip = PQAnalytics_IP::current();
-		if ( self::ignored( $ip ) || ! self::allow( $ip ) ) {
+		if ( self::ignored( $ip ) ) {
 			return array( 'ok' => 0 );
 		}
 
@@ -436,8 +454,12 @@ class PQAnalytics_Visits {
 		if ( ! $row ) {
 			return array( 'ok' => 0 );
 		}
-		if ( strtotime( $row->last_beat . ' UTC' ) < time() - PQANALYTICS_SESSION_MINUTES * 60 ) {
+		$last_beat = (int) strtotime( $row->last_beat . ' UTC' );
+		if ( $last_beat < time() - PQANALYTICS_SESSION_MINUTES * 60 ) {
 			return array( 'ok' => 0, 'expired' => 1 );
+		}
+		if ( $last_beat > time() - self::MIN_BEAT_SECONDS ) {
+			return array( 'ok' => 1 );
 		}
 
 		$now = PQAnalytics_DB::now();
@@ -450,8 +472,8 @@ class PQAnalytics_Visits {
 				$v
 			)
 		);
-		$wpdb->update( $visits, array( 'last_beat' => $now ), array( 'id' => $v ), array( '%s' ), array( '%d' ) );
-		$wpdb->update( $visitors, array( 'last_seen' => $now ), array( 'id' => (int) $row->visitor_id ), array( '%s' ), array( '%d' ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_beat = %s WHERE id = %d', $visits, $now, $v ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_seen = %s WHERE id = %d', $visitors, $now, (int) $row->visitor_id ) );
 
 		return array( 'ok' => 1 );
 	}
@@ -472,7 +494,7 @@ class PQAnalytics_Visits {
 			return;
 		}
 		$ip = PQAnalytics_IP::current();
-		if ( self::ignored( $ip ) || ! self::allow( $ip ) ) {
+		if ( self::ignored( $ip ) ) {
 			return;
 		}
 
@@ -486,18 +508,25 @@ class PQAnalytics_Visits {
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - PQANALYTICS_SESSION_MINUTES * 60 );
 		$visit  = $wpdb->get_row(
 			$wpdb->prepare(
-				'SELECT id FROM %i WHERE is_bot = 1 AND ip = %s AND ua = %s AND last_beat >= %s ORDER BY id DESC LIMIT 1',
+				'SELECT id, started, pages FROM %i WHERE is_bot = 1 AND ip = %s AND ua = %s AND last_beat >= %s ORDER BY id DESC LIMIT 1',
 				$visits,
 				$ip,
 				$ua,
 				$cutoff
 			)
 		);
+		if ( ! $visit && ! self::visit_allowed( $ip ) ) {
+			return;
+		}
 
 		$path      = PQAnalytics_DB::path_of( $url );
 		$prev_path = '';
 		if ( $visit ) {
-			$visit_id  = (int) $visit->id;
+			$visit_id = (int) $visit->id;
+			if ( ! self::page_allowed( $visit ) ) {
+				$wpdb->query( $wpdb->prepare( 'UPDATE %i SET last_beat = %s, last_url = %s WHERE id = %d', $visits, $now, $url, $visit_id ) );
+				return;
+			}
 			$prev_path = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT path FROM %i WHERE visit_id = %d ORDER BY id DESC LIMIT 1', $hits, $visit_id ) );
 			$wpdb->query(
 				$wpdb->prepare(
