@@ -1,8 +1,8 @@
-# PinnacleQuant.com Analytics
+# Live Visitor Analytics – Real-Time Visitor Tracking, IP Address & Location
 
-![PinnacleQuant.com Analytics](https://ps.w.org/pinnaclequant-com-analytics/assets/banner-1544x500.png)
+![Live Visitor Analytics](https://ps.w.org/pinnaclequant-com-analytics/assets/banner-1544x500.png?rev=3769745)
 
-See who is on your WordPress site right now: IP address, city and state, ISP, screen size, browser, where they came from and the pages they read. Free, and it all stays in your own database.
+See who is on your WordPress site right now: IP address, city and state, ISP, screen size, browser, where they came from and the pages they read. Free, and it all stays in your own database. By PinnacleQuant.com.
 
 **Install it from WordPress.org:** https://wordpress.org/plugins/pinnaclequant-com-analytics/
 
